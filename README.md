@@ -20,11 +20,11 @@ https://github.com/user-attachments/assets/94812f25-82f4-429f-85db-5e20c1d5e723
 
 **Stitching on a Brother Skitch (PP1)**
 
-<a href="packaging/media/skitch-pp1-demo.mp4">
-  <img src="packaging/media/skitch-pp1-demo.jpg" alt="Watch ZigZag stitching a design on a Brother Skitch PP1" width="320">
+<a href="https://github.com/simpsoka/zigzag/raw/refs/heads/main/packaging/media/skitch-pp1-demo.mp4">
+  <img src="packaging/media/skitch-pp1-demo.jpg" alt="Download the video of ZigZag stitching a design on a Brother Skitch PP1" width="320">
 </a>
 
-[Watch the video](packaging/media/skitch-pp1-demo.mp4)
+[Download the video (MP4, 1080p)](https://github.com/simpsoka/zigzag/raw/refs/heads/main/packaging/media/skitch-pp1-demo.mp4)
 · [Original post on X](https://x.com/simpsoka/status/2115254318161182876).
 
 ## Download for Mac
