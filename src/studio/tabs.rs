@@ -47,6 +47,7 @@ pub struct Tab {
     multi: Vec<usize>,
     isolated: Vec<String>,
     expanded: HashSet<String>,
+    density_report: Option<zigzag::document::DensityReport>,
     pub(crate) view: View,
     fit_pending: bool,
     undo: Vec<Document>,
@@ -75,6 +76,7 @@ impl Tab {
             multi: Vec::new(),
             isolated: Vec::new(),
             expanded: HashSet::new(),
+            density_report: None,
             view: View::default(),
             fit_pending: true,
             undo: Vec::new(),
@@ -216,6 +218,7 @@ impl Studio {
         swap(&mut self.layout.multi, &mut t.multi);
         swap(&mut self.layout.isolated, &mut t.isolated);
         swap(&mut self.layout.expanded, &mut t.expanded);
+        swap(&mut self.layout.density_report, &mut t.density_report);
         swap(&mut self.view, &mut t.view);
         swap(&mut self.fit_pending, &mut t.fit_pending);
         swap(&mut self.undo, &mut t.undo);

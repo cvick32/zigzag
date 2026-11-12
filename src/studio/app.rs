@@ -577,6 +577,7 @@ impl Studio {
         };
         let Some(doc) = from.pop() else { return false };
         to.push(std::mem::replace(&mut self.doc, doc));
+        self.layout.density_report = None;
         self.stable = self.doc.clone();
         if self.sel_index().is_none() {
             self.selected = None;

@@ -17,10 +17,12 @@ mod edit;
 mod glyphs;
 mod lettering;
 mod paths;
+mod reconstruct;
 pub use cleanup::{CleanUp, CleanUpReport};
 pub use edit::Fragment;
 pub use glyphs::{Carets, GlyphBox};
 pub use lettering::{Align, Case, TextSpec, default_font, font_families};
+pub use reconstruct::{DensityReport, DensityWarning};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 

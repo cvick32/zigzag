@@ -14,6 +14,7 @@ pub mod geom;
 pub mod machine;
 pub mod params;
 pub mod pathtools;
+pub mod reconstruct;
 pub mod stitch;
 pub mod svg;
 pub mod trace;

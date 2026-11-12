@@ -89,6 +89,8 @@ pub struct LayoutState {
     /// Numeric fields being edited: x, y, w, h (mm).
     pub fields: Option<[f64; 4]>,
     pub lock_aspect: bool,
+    pub keep_stitch_density: bool,
+    pub density_report: Option<zigzag::document::DensityReport>,
     pub rotate_by: f64,
     /// Pastes since the last copy, to cascade them.
     pub pastes: usize,
@@ -521,9 +523,32 @@ impl Studio {
         }
         let uids: Vec<usize> = idx.iter().map(|&i| self.doc.shapes[i].uid).collect();
         let from = self.selection_bounds();
-        match self.structural(|d| d.transform(&idx, m)) {
+        // A rigid move/rotation/reflection needs no reconstruction. Check both
+        // column lengths and their dot product, including non-uniform scaling.
+        let resized = (m[0] * m[0] + m[1] * m[1] - 1.0).abs() > 1e-6
+            || (m[2] * m[2] + m[3] * m[3] - 1.0).abs() > 1e-6
+            || (m[0] * m[2] + m[1] * m[3]).abs() > 1e-6;
+        let keep_density = self.layout.keep_stitch_density && resized;
+        let mut report = None;
+        match self.structural(|d| {
+            if keep_density {
+                report = Some(d.transform_keep_density(&idx, m)?);
+                Ok(())
+            } else {
+                d.transform(&idx, m)
+            }
+        }) {
             Ok(()) => {
                 self.status = format!("{what} {}.", self.selection_label(idx.len()));
+                if let Some(r) = &report {
+                    self.status.push_str(&format!(
+                        " Reconstructed {} fill(s), {} satin(s). {} uncertain object(s)/span(s) scaled without preserving density; review Transform panel.",
+                        r.fills, r.satins, r.warnings.len()
+                    ));
+                }
+                if resized {
+                    self.layout.density_report = report;
+                }
                 self.restore_selection(&uids);
                 self.layout.last = Some(LastTransform {
                     m,
@@ -1335,6 +1360,42 @@ impl Studio {
         if b.is_empty() {
             return;
         }
+        ui.checkbox(&mut self.layout.keep_stitch_density, "Keep stitch density")
+            .on_hover_text("Experimental: rebuild recognizable fills and satin sections before resizing. Uncertain spans resize normally and are flagged below. Original geometry is retained for later resizing; Undo restores the original stitches.");
+        if self.layout.keep_stitch_density {
+            ui.small("Experimental. Uncertain spans resize normally and are flagged below.");
+        }
+        if let Some(report) = &self.layout.density_report {
+            ui.label(format!(
+                "Last resize: {} fill(s), {} satin(s) reconstructed",
+                report.fills, report.satins
+            ));
+            let mut select = None;
+            if !report.warnings.is_empty() {
+                ui.colored_label(
+                    ui.visuals().warn_fg_color,
+                    "Density NOT preserved for these objects/spans:",
+                );
+                egui::ScrollArea::vertical()
+                    .id_salt("density_warnings")
+                    .max_height(120.0)
+                    .show(ui, |ui| {
+                        for warning in &report.warnings {
+                            if ui
+                                .small_button(&warning.label)
+                                .on_hover_text(&warning.reason)
+                                .clicked()
+                            {
+                                select = Some(warning.uid);
+                            }
+                        }
+                    });
+            }
+            if let Some(uid) = select {
+                self.restore_selection(&[uid]);
+                return;
+            }
+        }
         let refp = self.layout.reference;
         let rp = reference_point(&b, refp);
         let now = [
@@ -1524,6 +1585,96 @@ mod tests {
             );
         h.run_steps(4);
         h
+    }
+
+    #[test]
+    fn density_checkbox_reconstructs_and_undo_restores_manual_stitches() {
+        use zigzag::params::Kind;
+        let mut s = Studio::with_file(None, None);
+        let mut path = String::from("M0,0 ");
+        for i in 0..30 {
+            path.push_str(&format!("L0,{} L3,{} ", i as f64 * 0.4, i as f64 * 0.4));
+        }
+        let svg = format!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="30mm" height="30mm" viewBox="0 0 30 30"><path id="column_manual" d="{path}" fill="none" stroke="red"/><path id="unknown_manual" d="M10 0 L10 3 L10 6" fill="none" stroke="blue"/></svg>"#
+        );
+        s.doc = Document::from_svg(&svg, "density", None).unwrap();
+        s.set_selection(&[0, 1]);
+        let original = s.doc.to_svg().unwrap();
+        // Render the actual Transform panel, without unrelated dock state.
+        let mut h = Harness::builder()
+            .with_size(Vec2::new(400.0, 800.0))
+            .build_ui_state(|ui, s: &mut Studio| s.layout_panel(ui), s);
+        h.run_steps(2);
+        assert!(!h.state().layout.keep_stitch_density);
+        h.get_by_label("Keep stitch density").click();
+        h.run_steps(2);
+        assert!(h.state().layout.keep_stitch_density);
+        assert!(
+            h.state_mut()
+                .transform_selected(scale_about(P::default(), 2.0, 2.0), "Resized")
+        );
+        h.run_steps(2);
+        assert_eq!(h.state().doc.shapes[0].params.kind, Some(Kind::Manual));
+        assert!(
+            h.state()
+                .doc
+                .to_svg()
+                .unwrap()
+                .contains("data-zigzag-density-source=")
+        );
+        assert_eq!(
+            h.state()
+                .layout
+                .density_report
+                .as_ref()
+                .unwrap()
+                .warnings
+                .len(),
+            1
+        );
+        h.get_by_label("unknown_manual").click();
+        h.run_steps(2);
+        assert_eq!(h.state().sel_index(), Some(1));
+        assert!(h.state_mut().apply_history(crate::app::History::Undo));
+        assert_eq!(h.state().doc.to_svg().unwrap(), original);
+        assert!(h.state().layout.density_report.is_none());
+        assert!(h.state_mut().apply_history(crate::app::History::Redo));
+        assert!(
+            h.state()
+                .doc
+                .to_svg()
+                .unwrap()
+                .contains("data-zigzag-density-source=")
+        );
+    }
+
+    #[test]
+    fn density_checkbox_supports_downloaded_alower_and_undo_redo() {
+        let path = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/examples/alower.pes"));
+        let mut s = Studio::with_file(Some(path), None);
+        s.set_selection(&[0]);
+        let original = s.doc.to_svg().unwrap();
+        let mut h = Harness::builder()
+            .with_size(Vec2::new(400.0, 800.0))
+            .build_ui_state(|ui, s: &mut Studio| s.layout_panel(ui), s);
+        h.run_steps(2);
+        h.get_by_label("Keep stitch density").click();
+        h.run_steps(2);
+        assert!(
+            h.state_mut()
+                .transform_selected(scale_about(P::default(), 2.0, 2.0), "Resized")
+        );
+        h.run_steps(2);
+        let report = h.state().layout.density_report.as_ref().unwrap();
+        assert_eq!(report.satins, 2);
+        assert!(report.warnings.is_empty());
+        let rebuilt = h.state().doc.to_svg().unwrap();
+        assert!(rebuilt.contains("data-zigzag-density-source="));
+        assert!(h.state_mut().apply_history(crate::app::History::Undo));
+        assert_eq!(h.state().doc.to_svg().unwrap(), original);
+        assert!(h.state_mut().apply_history(crate::app::History::Redo));
+        assert_eq!(h.state().doc.to_svg().unwrap(), rebuilt);
     }
 
     fn index_of(h: &Harness<'_, Studio>, name: &str) -> usize {

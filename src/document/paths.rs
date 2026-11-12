@@ -63,6 +63,11 @@ impl Document {
         Ok(self.usvg_path(&tree, index)?.0)
     }
 
+    pub(super) fn path_to_design(&self, index: usize) -> Result<Affine> {
+        let tree = self.parsed()?;
+        Ok(self.usvg_path(&tree, index)?.1)
+    }
+
     /// Text's glyph outlines as a path (as drawn, corners kept).
     fn glyph_path(&self, index: usize) -> BezPath {
         match &self.shapes[index].geometry {
