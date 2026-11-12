@@ -18,6 +18,14 @@ and `zigzag` command-line tool power the same workflow outside the editor.
 
 https://github.com/user-attachments/assets/94812f25-82f4-429f-85db-5e20c1d5e723
 
+**Stitching on a Brother Skitch (PP1)**
+
+<a href="https://x.com/simpsoka/status/2115254318161182876">
+  <img src="https://pbs.twimg.com/amplify_video_thumb/2115254273638584320/img/8O13SoDmUCvYm1Py?format=webp&amp;name=medium" alt="Watch ZigZag stitching a design on a Brother Skitch PP1" width="320">
+</a>
+
+[Watch the video on X](https://x.com/simpsoka/status/2115254318161182876).
+
 ## Download for Mac
 
 **[Download ZigZag.dmg](https://github.com/simpsoka/zigzag/releases/latest/download/ZigZag.dmg)**
@@ -396,7 +404,7 @@ Verified:
 - PEN output checked against hand-computed sequences.
 - Studio run on Mesa OpenGL and driven by an agent over MCP.
 
-**Not yet run against a real Skitch.**
+**Tested on a real Brother Skitch (PP1).**
 
 ## Screenshots and videos
 
