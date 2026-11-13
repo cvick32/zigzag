@@ -1361,7 +1361,7 @@ impl Studio {
             return;
         }
         ui.checkbox(&mut self.layout.keep_stitch_density, "Keep stitch density")
-            .on_hover_text("Experimental: rebuild recognizable fills, satin sections, and repeated running stitches before resizing. Uncertain spans resize normally and are flagged below. Original geometry is retained for later resizing; Undo restores the original stitches.");
+            .on_hover_text("Experimental: rebuild recognizable fills, satin sections, and repeated running stitches before resizing. Uncertain spans resize normally and are flagged below. Undo restores the original stitches.");
         if self.layout.keep_stitch_density {
             ui.small("Experimental. Uncertain spans resize normally and are flagged below.");
         }
