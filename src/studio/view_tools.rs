@@ -844,6 +844,59 @@ mod tests {
     }
 
     #[test]
+    fn the_connect_bar_counts_the_cuts_it_saves_and_shows_what_it_sews() {
+        use egui_kittest::kittest::Queryable;
+        let mut h = studio(None);
+        // One object in two squares 3 mm apart, on bare cloth: a cut.
+        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="40mm" height="20mm" viewBox="0 0 40 20"><path id="pair" d="M2,2H12V12H2Z M15,2H25V12H15Z" fill="#203040"/></svg>"##;
+        let doc = zigzag::document::Document::from_svg(svg, "pair", None).unwrap();
+        h.state_mut().set_document(doc);
+        h.run_steps(3);
+        assert_eq!(h.state().design.trim_count(), 1);
+        assert!(
+            h.query_by_label("1 cut: drag to sew across the short ones")
+                .is_some()
+        );
+        assert!(h.state().bridges_peek.is_none());
+        // The bar in hand: what it sews is lit up on the canvas.
+        h.get_by_label("Connect gaps").hover();
+        h.run_steps(2);
+        assert!(h.state().bridges_peek.is_some());
+        // Too short to reach across: nothing saved.
+        h.state_mut().doc.settings.connect_mm = 1.0;
+        h.state_mut().replan();
+        h.run_steps(2);
+        assert!(h.query_by_label("1 cut: none this short").is_some());
+        assert!(h.state().design.bridges.is_empty());
+        h.state_mut().doc.settings.connect_mm = 0.0;
+        h.state_mut().replan();
+        h.run_steps(2);
+        // Dragged to its far end (20 mm): sewn across, and counted.
+        let bar = h.get_by_label("Connect gaps").rect();
+        let (from, to) = (
+            Pos2::new(bar.left() + 2.0, bar.center().y),
+            Pos2::new(bar.right() - 1.0, bar.center().y),
+        );
+        drag(&mut h, from, to);
+        h.run_steps(3);
+        h.state_mut().plan_now();
+        h.run_steps(1);
+        assert!(h.state().doc.settings.connect_mm > 15.0);
+        assert_eq!(h.state().design.trim_count(), 0);
+        assert_eq!(h.state().design.bridges.len(), 1);
+        assert!(h.query_by_label("1 cut down to 0").is_some());
+        // Kept in the file.
+        assert!(h.state().doc.to_svg().unwrap().contains("connect="));
+        // Undo takes the bridge away again.
+        h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Z);
+        h.run_steps(3);
+        h.state_mut().plan_now();
+        h.run_steps(1);
+        assert_eq!(h.state().doc.settings.connect_mm, 0.0);
+        assert_eq!(h.state().design.trim_count(), 1);
+    }
+
+    #[test]
     fn density_map_and_sewing_order_toggle_from_the_view_menu() {
         let mut h = studio(Some("badge.svg"));
         assert!(!h.state().view_tools.density && !h.state().view_tools.order_labels);

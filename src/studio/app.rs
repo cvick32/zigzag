@@ -149,6 +149,9 @@ pub struct Studio {
     /// The macOS menu bar (None elsewhere, and in tests).
     pub(crate) native_menu: Option<crate::native_menu::NativeMenu>,
     pub(crate) show_jumps: bool,
+    /// The gaps Connect sews across are lit up on the canvas until then
+    /// (while its bar is being dragged, and a moment after).
+    pub(crate) bridges_peek: Option<Instant>,
 
     pub(crate) player: Option<usize>,
     pub(crate) playing: bool,
@@ -311,6 +314,7 @@ impl Studio {
             dock_ui: Default::default(),
             native_menu: None,
             show_jumps: true,
+            bridges_peek: None,
             player: None,
             playing: false,
             speed: 400.0,
@@ -437,7 +441,7 @@ impl Studio {
         self.replans += 1;
         // A slow plan sends the next ones to the worker; one made here
         // supersedes any still out.
-        self.planner.slow = self.plan_ms > crate::planner::SLOW_MS;
+        self.planner.took(self.plan_ms);
         self.planner.superseded();
         self.names = svg::display_names(&self.doc.shapes);
         if let Some(p) = self.player {
@@ -1228,6 +1232,32 @@ impl Studio {
         canvas::hit_test(&self.doc.shapes, p, tol)
     }
 
+    /// The gaps Connect sews across in the open, lit up while its bar is
+    /// in hand: these are the stitches that will show.
+    fn draw_bridges(&mut self, painter: &egui::Painter, rect: Rect) {
+        let Some(until) = self.bridges_peek else {
+            return;
+        };
+        let now = Instant::now();
+        if now >= until {
+            self.bridges_peek = None;
+            return;
+        }
+        painter.ctx().request_repaint_after(until - now);
+        let p = crate::theme::pal(painter.ctx());
+        // Over any thread color: a dark edge, then the highlight.
+        let edge = Color32::from_rgba_unmultiplied(0, 0, 0, 170);
+        for &(a, b) in &self.design.bridges {
+            let (a, b) = (self.view.to_screen(rect, a), self.view.to_screen(rect, b));
+            painter.line_segment([a, b], egui::Stroke::new(5.0, edge));
+            painter.line_segment([a, b], egui::Stroke::new(2.5, p.warning));
+            for q in [a, b] {
+                painter.circle_filled(q, 4.5, edge);
+                painter.circle_filled(q, 3.0, p.warning);
+            }
+        }
+    }
+
     /// Dim everything outside the entered group.
     fn draw_isolation(&self, painter: &egui::Painter, rect: Rect) {
         let Some(g) = self.scope() else {
@@ -1684,6 +1714,9 @@ impl Studio {
             self.paint_stitches(&painter, rect, &self.design, &opts, 0, self.replans)
         };
         crate::profile::mark("c:stitches");
+        if sewing.is_none() {
+            self.draw_bridges(&painter, rect);
+        }
         self.draw_isolation(&painter, rect);
         if self.view_tools.density {
             self.density_map().draw(&painter, rect, &self.view);

@@ -314,7 +314,7 @@ pub fn tool_specs() -> Value {
                     "hoop": { "type": "string", "enum": hoops },
                     "remove_overlaps": { "type": "boolean", "description": "Skip fill hidden under later objects." },
                     "hat_order": { "type": "boolean", "description": "Sew center-out and bottom-up (for caps)." },
-                    "connect_mm": { "type": "number", "description": "Sew across gaps between objects up to this long (mm) with running stitches instead of cutting the thread; 0 always cuts." },
+                    "connect_mm": { "type": "number", "description": "Sew across gaps up to this long (mm), between objects or the separate parts of one, with running stitches instead of cutting the thread, where there is no way round out of sight (under a fill or what is sewn on top: that travel is made anyway); 0 cuts those." },
                     "preview_color": { "type": "string", "description": "Fabric color for previews, #rrggbb (e.g. the hat's color)." }
                 }
             }

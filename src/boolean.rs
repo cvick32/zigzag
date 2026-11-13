@@ -61,6 +61,19 @@ pub fn normalize(rings: &[Polyline], r: FillRule) -> Vec<Polyline> {
     from_shapes(normalized(rings, r))
 }
 
+/// The separate parts of a shape: each one's outline, then its holes.
+pub fn parts(rings: &[Polyline], r: FillRule) -> Vec<Vec<Polyline>> {
+    normalized(rings, r)
+        .into_iter()
+        .map(|shape| {
+            shape
+                .into_iter()
+                .map(|c| c.into_iter().map(|[x, y]| P::new(x, y)).collect())
+                .collect()
+        })
+        .collect()
+}
+
 /// The part of `rings` inside the rectangle `min`–`max`. Result uses even-odd.
 pub fn clip_to_rect(rings: &[Polyline], r: FillRule, min: P, max: P) -> Vec<Polyline> {
     clip_normalized_to_rect(&normalize(rings, r), min, max)

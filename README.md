@@ -46,6 +46,7 @@ Microsoft-trusted signature the first time they run; click *More info* →
 *Run anyway*. No Rust installation is needed.
 
 [Release notes and checksums](https://github.com/simpsoka/zigzag/releases/latest)
+· [Changelog](CHANGELOG.md)
 · [Publishing a release](RELEASE.md)
 
 ```
@@ -59,6 +60,7 @@ zigzag/
   src/stitch/stroke.rs    running / triple-run stitch
   src/boolean.rs          polygon booleans and offsets (i_overlay)
   src/design.rs           planner: overlap removal, cap order, routing, trims
+  src/route.rs            travel out of sight: a way through fills and under what covers
   src/checks.rs           digitizing checks (sizes, widths, lettering, hoop)
   src/formats/            PES (+PEC), DST, EXP, JEF, VP3, Skitch PEN writers;
                           PES/PEC/DST/EXP/JEF readers; preview; worksheet
@@ -99,8 +101,8 @@ use **auto spacing** (narrow columns more open, wide ones denser).
 Planner features:
 - **Remove overlaps:** fill hidden under later objects isn't sewn (keeps 0.5 mm of overlap).
 - **Cap order:** center-out, bottom-up, grouped by color, still respecting layering.
-- **Routing:** travel stitches stay inside shapes: straight across where a straight line stays inside, otherwise round the inside of the outline (Ink/Stitch's underpath), so a fill with a cut-out is sewn with few or no cuts. Trims only where neither works (up to 50 mm of travel).
-- **Sewing control per object:** a start and an end point (where the thread comes in and leaves, so the next object is close), trim after, stop after (to lay foam or trim appliqué). The document can also connect objects up to N mm apart with running stitches instead of cuts.
+- **Routing:** travel stitches stay out of sight: straight across where a straight line stays inside the fill, otherwise round the inside of its outline (Ink/Stitch's underpath), otherwise any way through the fill (round its holes, through its necks) or under whatever is sewn later on top. A fill in separate parts is sewn part by part, each part's underlay and top together. So a fill with cut-outs, or a dither in scattered blocks under another color, is sewn with few or no cuts. Trims only where none of that works (up to 50 mm of travel).
+- **Sewing control per object:** a start and an end point (where the thread comes in and leaves, so the next object is close), trim after, stop after (to lay foam or trim appliqué). What's left to cut is the document's Connect bar: drag it to sew across gaps up to N mm (between objects, or the parts of one) with running stitches instead of cuts. Those stitches show, so the panel counts the cuts saved as you drag and the canvas lights up what would be sewn.
 - **Fabric presets:** standard, thin cotton cap, structured cap, knit.
 - **Checks:** narrow fills, wide/narrow satins, small lettering, tiny gaps, fully covered objects, hoop fit.
 - **Group colors:** reorder to cut thread changes without breaking layering.
@@ -367,7 +369,7 @@ Checked against [Ink/Stitch](https://inkstitch.org/)'s features and tool docs:
 | Running, bean, manual stitch; satin column (two rails with rungs), E-stitch; tatami, contour, circular (spiral) fill | ✓ |
 | Ripple, meander, cross-stitch and tartan fills; S-stitch, zigzag and multicolor satin | ✓ |
 | Params per object with fabric-aware defaults; start/end commands; trim and stop commands | ✓ (Stitch panel's Sewing row) |
-| Auto-route (travel inside fills, underpath along the outline), Jump to Stroke | ✓ (document's Connect gaps) |
+| Auto-route (travel inside fills, underpath along the outline, under what's sewn on top), Jump to Stroke | ✓ (document's Connect bar) |
 | Simulator, stitch plan preview, density map, stacking-order labels | ✓ |
 | Lettering (system fonts, arcs, text on a path, multi-line, case, scale), thread palettes, Match All, thread kits | ✓ (Brother and Janome charts) |
 | Duplicate params, select by type, flip satin direction, test swatches, cleanup, troubleshoot (Issues) | ✓ |

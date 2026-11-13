@@ -56,6 +56,9 @@ struct State {
     reply: Vec<u8>,
     /// Commands to answer short, and how many more times.
     short: Vec<(u16, u32)>,
+    /// Paused with the machine's own button: the simulated person doesn't
+    /// press Start again by themselves.
+    held: bool,
 }
 
 /// A simulated machine. Clones share it: hand one to the session as its
@@ -90,6 +93,7 @@ impl Sim {
             ],
             reply: Vec::new(),
             short: Vec::new(),
+            held: false,
         })))
     }
 
@@ -110,6 +114,25 @@ impl Sim {
         s.tick();
         s.error = code;
         s.set(Status::Interrupted);
+    }
+
+    /// The Start/Stop button on the machine. While it sews, that pauses
+    /// it: a Skitch then says it's ready to sew (not paused), the needle
+    /// where it stopped, and waits for the button again.
+    pub fn press_start_stop(&self) {
+        let mut s = self.0.lock().unwrap();
+        s.tick();
+        match s.status {
+            Status::Sewing => {
+                s.held = true;
+                s.set(Status::ReadyToSew);
+            }
+            Status::ReadyToSew => {
+                s.held = false;
+                s.set(Status::Sewing);
+            }
+            _ => {}
+        }
     }
 
     /// The simulated person fixes the problem and clears the error.
@@ -164,7 +187,7 @@ impl State {
             Status::WaitingForMaskTrace if waited >= person => self.set(Status::MaskTracing),
             Status::MaskTracing if waited >= person => self.set(Status::MaskTraceComplete),
             // The person presses Start.
-            Status::ReadyToSew if waited >= person => self.set(Status::Sewing),
+            Status::ReadyToSew if !self.held && waited >= person => self.set(Status::Sewing),
             // The person rethreads and presses Start.
             Status::WaitingForColorChange if waited >= person * 1.5 => self.set(Status::Sewing),
             Status::Sewing => self.sew(dt),

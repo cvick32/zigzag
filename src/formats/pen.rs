@@ -18,7 +18,8 @@ pub const COLOR_END: u16 = 0x03;
 /// X flag value: last stitch of the pattern.
 pub const DATA_END: u16 = 0x05;
 
-/// Jumps longer than this (units) get lock stitches and a cut.
+/// Jumps longer than this (units) get lock stitches and a cut, whether or
+/// not the plan asked for one. (A trimmed move gets them at any length.)
 const FEED_LENGTH: f64 = 50.0;
 const TARGET_LENGTH: f64 = 8.0;
 const MAX_POINTS: usize = 5;
@@ -230,7 +231,8 @@ pub fn encode(d: &Design) -> PenData {
 }
 
 /// Port of Respira's `encodeStitchesToPen`, kept structurally identical so the
-/// output matches it byte for byte.
+/// output matches it byte for byte, but for one thing: a short trimmed move
+/// is locked like a long one.
 pub fn encode_stitches(ss: &[InStitch]) -> PenData {
     let mut out = Vec::with_capacity(ss.len() * 4 + 256);
     // Per record: the input stitch it came from, and its color.
@@ -258,7 +260,11 @@ pub fn encode_stitches(ss: &[InStitch]) -> PenData {
 
         if cmd & MOVE != 0 {
             let dist = (((x - px) as f64).powi(2) + ((y - py) as f64).powi(2)).sqrt();
-            if !first && dist > FEED_LENGTH {
+            // Every cut is locked on both sides, however short the hop. (Here
+            // we leave Respira, which cuts a short trimmed move bare: the
+            // loose tail then pulls back up as the next area starts and
+            // shreds at the needle bar guide.)
+            if !first && (dist > FEED_LENGTH || cmd & TRIM != 0) {
                 locks(&mut out, px, py, lock_direction(ss, i - 1, false));
                 tag(&out, i.saturating_sub(1), color);
                 push(&mut out, x, y, 0, FEED | CUT);
@@ -401,13 +407,13 @@ mod tests {
     }
 
     #[test]
-    fn long_jump_gets_ties_and_cut_short_trim_only_cut() {
+    fn every_cut_is_locked_both_sides_long_jump_or_short_trim() {
         let input = [
             st(0.0, 0.0, 0, 0),
             st(10.0, 0.0, 0, 0),
             st(100.0, 0.0, MOVE, 0), // 9 mm jump: tie-off, cut, tie-in
             st(110.0, 0.0, 0, 0),
-            st(120.0, 0.0, MOVE | TRIM, 0), // 1 mm trimmed move: just FEED|CUT
+            st(120.0, 0.0, MOVE | TRIM, 0), // 1 mm trimmed move: the same
             st(130.0, 0.0, 0, 0),
         ];
         let got = decode(&encode_stitches(&input).bytes);
@@ -416,9 +422,37 @@ mod tests {
             cuts,
             vec![&(100, 0, 0, FEED | CUT), &(120, 0, 0, FEED | CUT)]
         );
-        // 1 + 8 (start) + 1 + 8 (tie-off) + 1 (jump) + 8 (tie-in) + 1 + 1 + 1 = 30
-        assert_eq!(got.len(), 30);
+        // 1 + 8 (start) + 1, then twice 8 (tie-off) + 1 (cut) + 8 (tie-in) + 1.
+        assert_eq!(got.len(), 46);
         assert_eq!(got.last().unwrap().2, DATA_END);
+        // Round each cut: eight stitches where the thread ends (±0.2 mm
+        // back along what was sewn), eight where it starts again.
+        for k in (0..got.len()).filter(|&k| got[k].3 & CUT != 0) {
+            let (from, to) = (got[k - 9], got[k]);
+            for (j, s) in got[k - 8..k].iter().enumerate() {
+                let dx = if j % 2 == 0 { -2 } else { 2 };
+                assert_eq!(*s, (from.0 + dx, from.1, 0, 0), "tie-off at {k}");
+            }
+            for (j, s) in got[k + 1..k + 9].iter().enumerate() {
+                let dx = if j % 2 == 0 { 2 } else { -2 };
+                assert_eq!(*s, (to.0 + dx, to.1, 0, 0), "tie-in at {k}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_short_move_the_plan_does_not_trim_is_not_cut() {
+        let input = [
+            st(0.0, 0.0, 0, 0),
+            st(10.0, 0.0, 0, 0),
+            st(40.0, 0.0, MOVE, 0), // 3 mm, no trim: carried across
+            st(50.0, 0.0, 0, 0),
+        ];
+        let got = decode(&encode_stitches(&input).bytes);
+        assert!(got.iter().all(|s| s.3 & CUT == 0));
+        // 1 + 8 (start) + 1 + 1 (feed) + 1
+        assert_eq!(got.len(), 12);
+        assert_eq!(got[10], (40, 0, 0, FEED));
     }
 
     #[test]

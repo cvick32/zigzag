@@ -2882,21 +2882,44 @@ impl Studio {
                 ui.checkbox(&mut self.doc.settings.hat_order, "Cap order")
                     .on_hover_text("Sew from the center out and the bottom up, grouping colors, so puckering is pushed away");
             });
+            // Connect: gaps this short are sewn across in the open rather
+            // than cut. A bar to drag, the cuts it saves beside it, and what
+            // it sews lit up on the canvas meanwhile.
+            let mut peek = false;
             fm.row("Connect", |ui, lid| {
-                let mut on = self.doc.settings.connect_mm > 0.0;
-                if ui
-                    .checkbox(&mut on, "Gaps up to")
-                    .on_hover_text("Sew between objects this close with running stitches instead of cutting the thread (fewer thread ends; the stitches show)")
-                    .changed()
-                {
-                    self.doc.settings.connect_mm = if on { 3.0 } else { 0.0 };
-                }
-                ui.add_enabled(
-                    on,
-                    crate::units::drag_mm(&mut self.doc.settings.connect_mm, 0.0..=50.0, 0.1),
-                )
-                .labelled_by(lid);
+                let mm = &mut self.doc.settings.connect_mm;
+                ui.spacing_mut().slider_width = 100.0;
+                let bar = ui
+                    .add(
+                        egui::Slider::new(mm, 0.0..=CONNECT_BAR_MM)
+                            .show_value(false)
+                            .step_by(0.1)
+                            .clamping(egui::SliderClamping::Never),
+                    )
+                    .labelled_by(lid)
+                    .on_hover_text(
+                        "Sew across gaps up to this long with running stitches instead of cutting the thread, between objects or the parts of one. These stitches show: they light up on the canvas as you drag. (Travel that's out of sight, under a fill or what's sewn on top, is made anyway.)",
+                    );
+                bar.widget_info(|| {
+                    egui::WidgetInfo::labeled(egui::Role::Slider, true, "Connect gaps")
+                });
+                let field = ui.add(crate::units::drag_mm(mm, 0.0..=50.0, 0.1));
+                peek = [&bar, &field]
+                    .iter()
+                    .any(|r| r.hovered() || r.dragged() || r.has_focus() || r.changed());
             });
+            let (cuts, bridged) = (self.design.trim_count(), self.design.bridges.len());
+            fm.wide(|ui| {
+                caption(
+                    ui,
+                    connect_note(self.doc.settings.connect_mm, cuts, bridged),
+                );
+            });
+            if peek {
+                self.bridges_peek =
+                    Some(std::time::Instant::now() + std::time::Duration::from_secs(6));
+                fm.ui.ctx().request_repaint();
+            }
             fm.row("Preview on", |ui, lid| {
                 ui.color_edit_button_srgb(&mut self.doc.settings.cloth)
                     .labelled_by(lid)
@@ -2914,6 +2937,24 @@ impl Studio {
             return;
         }
         self.layout_panel(ui);
+    }
+}
+
+/// How far the Connect bar goes (mm; the field beside it goes further).
+const CONNECT_BAR_MM: f64 = 20.0;
+
+/// Under the Connect bar: the cuts there are, and how many it saved.
+pub(crate) fn connect_note(connect_mm: f64, cuts: usize, bridged: usize) -> String {
+    let n = |k: usize| format!("{k} cut{}", if k == 1 { "" } else { "s" });
+    if bridged > 0 {
+        // (In words: the app's font has no arrow.)
+        format!("{} down to {cuts}", n(cuts + bridged))
+    } else if connect_mm > 0.0 && cuts > 0 {
+        format!("{}: none this short", n(cuts))
+    } else if cuts > 0 {
+        format!("{}: drag to sew across the short ones", n(cuts))
+    } else {
+        "No cuts".to_string()
     }
 }
 

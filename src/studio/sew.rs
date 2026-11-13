@@ -243,6 +243,16 @@ pub struct Thread {
     pub name: String,
 }
 
+/// Whether the needle can be moved along the design: the machine has it
+/// and isn't moving. (A Skitch paused with its own Start/Stop button says
+/// it's ready to sew, the same as before the first stitch: not paused.)
+fn needle_movable(st: Status) -> bool {
+    matches!(
+        st,
+        Status::Paused | Status::Interrupted | Status::Stopped | Status::ReadyToSew
+    )
+}
+
 /// What the machine is doing, as one heading, for the status line.
 fn headline(s: &Snapshot) -> String {
     match &s.link {
@@ -670,10 +680,7 @@ impl Studio {
         let p = pal_ui(ui);
         let total = sent.pen.stitches.max(1);
         let at = self.at_stitch(s);
-        let movable = matches!(
-            s.status,
-            Some(Status::Paused | Status::Interrupted | Status::Stopped)
-        );
+        let movable = s.status.is_some_and(needle_movable);
         let w = ui.available_width();
         let (r, resp) = ui.allocate_exact_size(
             Vec2::new(w, 14.0),
@@ -1006,6 +1013,9 @@ impl Studio {
             }),
             Status::ReadyToSew => card(ui, Some(p.accent), |ui| {
                 title(ui, "Press Start on the machine");
+                if started {
+                    caption(ui, "To go back first, drag the bar or use Needle below.");
+                }
                 if let Some(t) = thread(k) {
                     self.thread_row(ui, &t, &note(k));
                 }
@@ -1148,8 +1158,8 @@ impl Studio {
                 ask = Some(Cmd::Trace);
             }
         });
-        // Fine needle moves while paused.
-        if matches!(st, Status::Paused | Status::Interrupted | Status::Stopped)
+        // Fine needle moves while it's stopped.
+        if needle_movable(st)
             && let Some(sent) = self.machine.ours(s).cloned()
         {
             let at = self.at_stitch(s) as i64;
@@ -1852,6 +1862,54 @@ mod tests {
         until(&mut h, "needle moved", |_| sim.stitch() < 200);
         sim.clear_error();
         h.get_by_label("Resume").click();
+        until(&mut h, "sewing again", status(Status::Sewing));
+    }
+
+    #[test]
+    fn paused_with_the_machines_own_button_the_needle_can_go_back() {
+        let (mut h, sim) = studio(SimConfig {
+            stitches_per_s: 150.0,
+            person_s: 0.05,
+            needs_homing: false,
+        });
+        let ctx = h.ctx.clone();
+        h.state_mut().machine.open = true;
+        h.state_mut().machine.connect(true, &ctx);
+        until(&mut h, "connected", |s| {
+            s.link == Link::Connected && s.status.is_some()
+        });
+        h.state_mut().send_design(&ctx);
+        until(&mut h, "sent", |s| s.uuid.is_some() && s.upload.is_none());
+        until(&mut h, "traced", status(Status::MaskTraceComplete));
+        h.state_mut().machine.ask(crate::machine::Cmd::Sew, &ctx);
+        until(&mut h, "sewing", |s| {
+            s.status == Some(Status::Sewing) && s.progress.is_some_and(|p| p.current_stitch > 60)
+        });
+        // Nothing to move the needle with while it sews.
+        assert!(h.query_by_label("Back 10 stitches").is_none());
+        // Start/Stop on the machine: a Skitch says it's ready to sew, not
+        // paused, part-way through the design.
+        sim.press_start_stop();
+        let at = sim.stitch();
+        until(&mut h, "stopped where it was", |s| {
+            s.status == Some(Status::ReadyToSew)
+                && s.progress.is_some_and(|p| p.current_stitch as usize == at)
+        });
+        assert!(h.query_by_label("Press Start on the machine").is_some());
+        h.get_by_label("Back 10 stitches").click();
+        until(&mut h, "needle back ten", |_| sim.stitch() == at - 10);
+        // The bar moves it too.
+        let bar = h.get_by_label("Stitch timeline").rect();
+        let to = egui::pos2(bar.left() + bar.width() * 0.01, bar.center().y);
+        h.hover_at(to);
+        h.run_steps(1);
+        h.drag_at(to);
+        h.run_steps(1);
+        h.drop_at(to);
+        h.run_steps(3);
+        until(&mut h, "needle moved along the bar", |_| sim.stitch() < 60);
+        // Start on the machine again: it sews on from there.
+        sim.press_start_stop();
         until(&mut h, "sewing again", status(Status::Sewing));
     }
 

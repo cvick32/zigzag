@@ -24,6 +24,8 @@ fn studio_with_logo() -> Harness<'static, Studio> {
             |ui, s: &mut Studio| s.frame(ui),
             Studio::with_file(None, None),
         );
+    // As the app does it: a slow plan moves planning to the worker.
+    h.state_mut().planner.timed = true;
     let doc = zigzag::document::Document::open(&png).unwrap();
     h.state_mut().set_document(doc);
     h.run_steps(5);

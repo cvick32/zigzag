@@ -22,7 +22,8 @@ your Mac's keychain.
 1. Update `version` in `Cargo.toml` and regenerate `Cargo.lock` with Cargo.
    If the lockfile changes, regenerate `THIRD-PARTY-NOTICES.md` with
    `packaging/licenses/generate.sh`.
-2. Add `packaging/releases/<version>.md` with the release notes.
+2. Add `packaging/releases/<version>.md` with the release notes and update
+   `CHANGELOG.md`.
 3. Test the app, commit all changes, and push `main` to GitHub.
 4. Run:
 

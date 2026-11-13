@@ -9,6 +9,7 @@
 use crate::boolean;
 use crate::geom::{Bounds, FillRule, P, Polyline, dedupe, segment_inside};
 use crate::params::{Fabric, Kind, defaults, underlay};
+use crate::route::Zone;
 use crate::stitch::fill::{FillParams, tatami};
 use crate::stitch::satin::{self, Rails, SatinParams};
 use crate::stitch::stroke::running;
@@ -44,6 +45,10 @@ pub struct Design {
     /// Input shapes left with nothing to fill: covered by what's sewn on
     /// top (so the checks needn't work the overlaps out again).
     pub covered: Vec<bool>,
+    /// Gaps sewn straight across in the open because the document connects
+    /// gaps that short (from, to): each would be a cut without it. (Travel
+    /// that's out of sight, under a fill or what's sewn on top, isn't here.)
+    pub bridges: Vec<(P, P)>,
 }
 
 #[derive(Clone, Debug)]
@@ -63,11 +68,13 @@ pub struct PlanOptions {
     pub overlap: f64,
     /// Cap order: center-out, bottom-up, fewest color changes.
     pub hat_order: bool,
-    /// Gaps between objects up to this long (units) are sewn across with
-    /// running stitches rather than cut (Ink/Stitch's "jump to stroke").
+    /// Gaps up to this long (units), between objects or the separate parts
+    /// of one, are sewn across with running stitches rather than cut
+    /// (Ink/Stitch's "jump to stroke"), where there's no way round out of
+    /// sight. These show: [`Design::bridges`] lists them.
     pub connect: f64,
-    /// When a straight line between two parts of a fill would leave it,
-    /// travel stitches follow the inside of its outline instead, up to
+    /// Travel stitches that stay out of sight (round the inside of a fill's
+    /// outline, through it, or under what's sewn later on top) go up to
     /// this far (units); further than that, the thread is cut.
     pub travel_route: f64,
 }
@@ -161,6 +168,10 @@ struct ShapeRuns {
     /// Groups sewn in a thread other than the object's (tartan stripes,
     /// multicolor satin): (group index, color). Each starts a color block.
     colors: Vec<(usize, [u8; 3])>,
+    /// For a fill in several separate parts: which part each piece of each
+    /// group is in, so a part's underlay and top are sewn together (rather
+    /// than every part's underlay, then back round them all for the top).
+    islands: Vec<Vec<usize>>,
 }
 
 impl ShapeRuns {
@@ -170,7 +181,58 @@ impl ShapeRuns {
             area,
             stops: Vec::new(),
             colors: Vec::new(),
+            islands: Vec::new(),
         }
+    }
+
+    /// Work out [`ShapeRuns::islands`] (left empty when the fill is all
+    /// one part, or its groups aren't simply underlay and top).
+    fn find_islands(&mut self) {
+        self.islands.clear();
+        let Some((rings, rule)) = &self.area else {
+            return;
+        };
+        if rings.len() < 2
+            || !self.stops.is_empty()
+            || !self.colors.is_empty()
+            || self.groups.iter().filter(|g| !g.is_empty()).count() < 2
+        {
+            return;
+        }
+        let parts = boolean::parts(rings, *rule);
+        if parts.len() < 2 {
+            return;
+        }
+        let part_of = |p: P| {
+            parts
+                .iter()
+                .position(|part| crate::geom::point_inside(part, FillRule::EvenOdd, p))
+                .unwrap_or_else(|| {
+                    // On the outline, or just past it: the nearest part.
+                    let near = |part: &Vec<Polyline>| {
+                        part.iter()
+                            .filter(|r| r.len() >= 2)
+                            .map(|r| {
+                                let mut closed = r.clone();
+                                closed.push(r[0]);
+                                nearest_along(&closed, p).0
+                            })
+                            .fold(f64::INFINITY, f64::min)
+                    };
+                    (0..parts.len())
+                        .min_by(|&a, &b| near(&parts[a]).total_cmp(&near(&parts[b])))
+                        .unwrap_or(0)
+                })
+        };
+        self.islands = self
+            .groups
+            .iter()
+            .map(|g| {
+                g.iter()
+                    .map(|piece| part_of(piece.pts[piece.pts.len() / 2]))
+                    .collect()
+            })
+            .collect();
     }
 }
 
@@ -320,6 +382,87 @@ fn route_along(inset: &[Polyline], from: P, to: P, max_len: f64) -> Option<Polyl
         prev = q;
     }
     Some(out)
+}
+
+/// What a shape's stitches cover (none, for a run), once it's been asked.
+type Cover = Option<(Vec<Polyline>, FillRule)>;
+
+/// A fill's rows no further apart than this (mm) hide travel under them.
+const HIDING_SPACING: f64 = 1.0;
+
+/// Where travel to and within the shape sewn at `order[pos]` is out of
+/// sight: under its own fill (`own`, when its stitches hide what's under
+/// them) and under whatever's sewn later on top. `from` is where the
+/// needle's coming from: taken in when it's within `reach` (the last
+/// object, close by).
+#[allow(clippy::too_many_arguments)]
+fn hidden_zone(
+    shapes: &[Shape],
+    order: &[usize],
+    pos: usize,
+    own: Option<&(Vec<Polyline>, FillRule)>,
+    from: P,
+    reach: f64,
+    covers: &mut [Option<Cover>],
+    shape_bounds: &mut Option<Vec<Bounds>>,
+) -> Option<Zone> {
+    let bounds = shape_bounds.get_or_insert_with(|| {
+        shapes
+            .iter()
+            .map(|s| geometry_bounds(&s.geometry))
+            .collect()
+    });
+    let mut b = match own {
+        Some((rings, _)) => {
+            let mut b = Bounds::empty();
+            rings.iter().flatten().for_each(|&p| b.add(p));
+            b
+        }
+        None => bounds[order[pos]],
+    };
+    if b.is_empty() {
+        return None;
+    }
+    if from.x > b.min.x - reach
+        && from.x < b.max.x + reach
+        && from.y > b.min.y - reach
+        && from.y < b.max.y + reach
+    {
+        b.add(from);
+    }
+    // Room to go round the outside of a part, under what covers it there.
+    let grow = |b: &Bounds, by: f64| Bounds {
+        min: P::new(b.min.x - by, b.min.y - by),
+        max: P::new(b.max.x + by, b.max.y + by),
+    };
+    let b = grow(&b, 20.0);
+    // (A satin's bounds are its centerline's: its width reaches further.)
+    let near = grow(&b, 50.0);
+    let mut later: Vec<usize> = Vec::new();
+    for &j in &order[pos + 1..] {
+        if bounds[j].is_empty() || !overlaps(&near, &bounds[j]) {
+            continue;
+        }
+        if covers[j]
+            .get_or_insert_with(|| coverage(&shapes[j]))
+            .is_some()
+        {
+            later.push(j);
+        }
+    }
+    let mut parts: Vec<(&[Polyline], FillRule)> = Vec::new();
+    if let Some((rings, rule)) = own {
+        parts.push((rings.as_slice(), *rule));
+    }
+    for j in later {
+        if let Some(Some((rings, rule))) = &covers[j] {
+            parts.push((rings.as_slice(), *rule));
+        }
+    }
+    if parts.is_empty() {
+        return None;
+    }
+    Zone::new(&parts, b)
 }
 
 /// The outline a shape's start and end points are measured along: a
@@ -788,6 +931,7 @@ fn applique_runs(rings: &[Polyline], shape: &Shape, opt: &PlanOptions) -> ShapeR
         area: None,
         stops: vec![1, 2],
         colors: Vec::new(),
+        islands: Vec::new(),
     }
 }
 
@@ -913,6 +1057,9 @@ fn shape_runs_guarded(
             // start or end to route to. The groups stay: stops count them.
             for g in &mut sr.groups {
                 g.retain(|p| !p.pts.is_empty());
+            }
+            if shape.params.kind.unwrap_or(Kind::Fill) == Kind::Fill {
+                sr.find_islands();
             }
             sr
         }
@@ -1384,22 +1531,32 @@ pub fn plan_cached(
                 )
             })
             .collect(),
+        bridges: Vec::new(),
     };
+    // What each shape covers and where it is, worked out when travel first
+    // looks for cover.
+    let mut covers: Vec<Option<Cover>> = vec![None; shapes.len()];
+    let mut shape_bounds: Option<Vec<Bounds>> = None;
     let mut cursor: Option<P> = None;
     // Set by the last object: cut before the next run, or pause before
     // the next object.
     let mut force_trim = false;
     let mut stop_next = false;
-    // The last run sewn belongs to the object being sewn (gaps inside an
-    // object are never connected by the document's `connect`).
+    // The last run sewn belongs to the object being sewn, so its outline
+    // can be used to route travel within the same shape.
     let mut same_shape = false;
-    for &si in &order {
+    for (pos, &si) in order.iter().enumerate() {
         let shape = &shapes[si];
         if shape.params.kind == Some(Kind::Skip) {
             continue;
         }
         // The fill's travel ring, worked out when a gap first needs it.
         let mut travel: Option<Vec<Polyline>> = None;
+        // Likewise where travel is out of sight.
+        let mut zone: Option<Option<Zone>> = None;
+        // Under a fill's own stitches, if they're close enough to hide it.
+        let own_hides = shape.params.kind.unwrap_or(Kind::Fill) == Kind::Fill
+            && shape.params.fill_spacing(&opt.fabric) <= HIDING_SPACING;
         let start_at = shape
             .params
             .start
@@ -1446,7 +1603,50 @@ pub fn plan_cached(
             design.block_shapes.push(Vec::new());
         }
         let last_group = sr.groups.iter().rposition(|g| !g.is_empty()).unwrap_or(0);
-        for (gi, mut group) in sr.groups.into_iter().enumerate() {
+        // The groups in sewing order: one after another, or (a fill in
+        // separate parts, with no start or end point to honour) part by
+        // part, each part's groups together, nearest part next.
+        let mut queue: std::collections::VecDeque<(usize, Vec<Piece>)> =
+            std::collections::VecDeque::new();
+        let mut parts: Vec<Vec<(usize, Vec<Piece>)>> = Vec::new();
+        if !sr.islands.is_empty() && start_at.is_none() && end_at.is_none() {
+            for (gi, (group, of)) in sr.groups.into_iter().zip(&sr.islands).enumerate() {
+                for (piece, &k) in group.into_iter().zip(of) {
+                    if parts.len() <= k {
+                        parts.resize_with(k + 1, Vec::new);
+                    }
+                    match parts[k].last_mut() {
+                        Some((g, pieces)) if *g == gi => pieces.push(piece),
+                        _ => parts[k].push((gi, vec![piece])),
+                    }
+                }
+            }
+            parts.retain(|p| !p.is_empty());
+        } else {
+            queue.extend(sr.groups.into_iter().enumerate());
+        }
+        loop {
+            if queue.is_empty() && !parts.is_empty() {
+                let next = cursor.map_or(0, |here| {
+                    let reach = |part: &Vec<(usize, Vec<Piece>)>| {
+                        part[0]
+                            .1
+                            .iter()
+                            .map(|piece| {
+                                let d = piece.nearest_start(here).0;
+                                piece.alt.as_ref().map_or(d, |alt| d.min(here.dist(alt[0])))
+                            })
+                            .fold(f64::INFINITY, f64::min)
+                    };
+                    (0..parts.len())
+                        .min_by(|&a, &b| reach(&parts[a]).total_cmp(&reach(&parts[b])))
+                        .unwrap_or(0)
+                });
+                queue.extend(parts.swap_remove(next));
+            }
+            let Some((gi, mut group)) = queue.pop_front() else {
+                break;
+            };
             // The group's thread: the object's, unless the group names one.
             let group_color = sr
                 .colors
@@ -1597,38 +1797,68 @@ pub fn plan_cached(
                     let inside = sr.area.as_ref().is_some_and(|(rings, rule)| {
                         gap <= opt.travel_inside && segment_inside(rings, *rule, prev, start, 2.0)
                     });
-                    let across =
-                        opt.max_jump_no_trim
-                            .max(if same_shape { 0.0 } else { opt.connect });
-                    if !force_trim && (gap <= across || inside) {
-                        // Sew straight across: append to the previous run.
+                    let straight = || -> Vec<P> {
                         let n = (gap / 30.0).ceil() as usize;
-                        for i in 1..n {
-                            run.pts.push(prev.lerp(start, i as f64 / n as f64));
+                        (1..n)
+                            .map(|i| prev.lerp(start, i as f64 / n as f64))
+                            .collect()
+                    };
+                    // The stitches from the last run to this one, when the
+                    // thread needn't be cut between them.
+                    let mut across: Option<Vec<P>> = None;
+                    if force_trim {
+                        // Cut here, whatever's near.
+                    } else if gap <= opt.max_jump_no_trim || inside {
+                        // Too short to matter, or straight across the fill.
+                        across = Some(straight());
+                    } else {
+                        // Within a fill: round the inside of its outline
+                        // (Ink/Stitch's underpath).
+                        if same_shape
+                            && opt.travel_route > 0.0
+                            && let Some((rings, rule)) = sr.area.as_ref()
+                        {
+                            across = route_along(
+                                travel.get_or_insert_with(|| travel_ring(rings, *rule)),
+                                prev,
+                                start,
+                                opt.travel_route,
+                            );
                         }
+                        // Or any way that's out of sight: through the fill
+                        // (round its holes, through its necks) and under
+                        // what's sewn later on top.
+                        if across.is_none() && opt.travel_route > 0.0 {
+                            across = zone
+                                .get_or_insert_with(|| {
+                                    hidden_zone(
+                                        shapes,
+                                        &order,
+                                        pos,
+                                        sr.area.as_ref().filter(|_| own_hides),
+                                        prev,
+                                        opt.travel_route,
+                                        &mut covers,
+                                        &mut shape_bounds,
+                                    )
+                                })
+                                .as_ref()
+                                .and_then(|z| z.route(prev, start, opt.travel_route));
+                        }
+                        // Or in the open, where the document says gaps this
+                        // short are sewn across.
+                        if across.is_none() && gap <= opt.connect {
+                            design.bridges.push((prev, start));
+                            across = Some(straight());
+                        }
+                    }
+                    if let Some(across) = across {
+                        run.pts
+                            .extend(across.into_iter().filter(|q| q.dist(start) > 1e-6));
                         run.pts.extend(pts.iter().copied());
                         cursor = run.pts.last().copied();
                         force_trim = false;
                         same_shape = true;
-                        continue;
-                    }
-                    // Within a fill: travel round the inside of its outline
-                    // rather than cutting (Ink/Stitch's underpath).
-                    if !force_trim
-                        && same_shape
-                        && opt.travel_route > 0.0
-                        && let Some((rings, rule)) = sr.area.as_ref()
-                        && let Some(route) = route_along(
-                            travel.get_or_insert_with(|| travel_ring(rings, *rule)),
-                            prev,
-                            start,
-                            opt.travel_route,
-                        )
-                    {
-                        run.pts
-                            .extend(route.into_iter().filter(|q| q.dist(start) > 1e-6));
-                        run.pts.extend(pts.iter().copied());
-                        cursor = run.pts.last().copied();
                         continue;
                     }
                     trim_before = true;
@@ -1714,6 +1944,9 @@ impl Design {
                     *p = *p - c;
                 }
             }
+        }
+        for (a, b) in &mut self.bridges {
+            (*a, *b) = (*a - c, *b - c);
         }
     }
 
@@ -2233,6 +2466,164 @@ mod tests {
         assert_eq!(d.blocks.len(), 2);
         assert_eq!(d.blocks[0].color, d.blocks[1].color);
         assert_eq!(d.block_shapes, vec![vec![0], vec![1]]);
+    }
+
+    /// One object in two separate 10 mm squares, `gap` apart.
+    fn two_squares(gap: f64) -> Shape {
+        shape(
+            Geometry::Fill {
+                rings: vec![sq(0.0, 0.0, 100.0), sq(100.0 + gap, 0.0, 100.0)],
+                rule: FillRule::NonZero,
+            },
+            Kind::Fill,
+            [0; 3],
+        )
+    }
+
+    /// Every point along the thread of `run` (each stitch, and between).
+    fn along(run: &Run) -> Vec<P> {
+        run.pts
+            .windows(2)
+            .flat_map(|w| {
+                let n = w[0].dist(w[1]).ceil().max(1.0) as usize;
+                (0..=n).map(move |i| w[0].lerp(w[1], i as f64 / n as f64))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn each_part_of_a_fill_is_sewn_whole_before_the_next() {
+        let mut s = two_squares(200.0);
+        s.params.underlay = Some(true);
+        let d = plan("p", &[s.clone()], &PlanOptions::default());
+        // One cut, between the parts: not one after the first's underlay
+        // and another back for its top.
+        assert_eq!(d.trim_count(), 1);
+        let runs = &d.blocks[0].runs;
+        assert_eq!(runs.len(), 2);
+        let left = |r: &Run| r.pts.iter().all(|p| p.x < 150.0);
+        let right = |r: &Run| r.pts.iter().all(|p| p.x > 150.0);
+        assert!(
+            (left(&runs[0]) && right(&runs[1])) || (right(&runs[0]) && left(&runs[1])),
+            "a run to each square"
+        );
+        // A start point to honour: sewn group by group, as it was.
+        s.params.start = Some(0.0);
+        assert!(plan("p", &[s], &PlanOptions::default()).trim_count() > 1);
+    }
+
+    #[test]
+    fn travel_between_parts_goes_under_what_is_sewn_on_top() {
+        // Two squares 4 mm apart, and a later object across the gap.
+        let under = two_squares(40.0);
+        let over = shape(
+            fill(vec![
+                P::new(80.0, 20.0),
+                P::new(160.0, 20.0),
+                P::new(160.0, 80.0),
+                P::new(80.0, 80.0),
+            ]),
+            Kind::Fill,
+            [255, 0, 0],
+        );
+        let d = plan("p", &[under.clone(), over.clone()], &PlanOptions::default());
+        assert_eq!(d.blocks[0].runs.len(), 1, "no cut between the squares");
+        assert!(d.bridges.is_empty(), "and nothing in the open");
+        // What crosses the gap is under the object on top, off its edges.
+        let crossing: Vec<P> = along(&d.blocks[0].runs[0])
+            .into_iter()
+            .filter(|p| p.x > 105.0 && p.x < 135.0)
+            .collect();
+        assert!(!crossing.is_empty());
+        assert!(
+            crossing.iter().all(|p| p.y > 24.0 && p.y < 76.0),
+            "{crossing:?}"
+        );
+        // Nothing on top: the gap is bare cloth, and the thread is cut.
+        let d = plan("p", std::slice::from_ref(&under), &PlanOptions::default());
+        assert_eq!(d.trim_count(), 1);
+        // Sewn the other way up, the cover is underneath: no hiding there.
+        let d = plan("p", &[over.clone(), under.clone()], &PlanOptions::default());
+        assert_eq!(d.blocks[1].runs.len(), 2);
+        // And no routing asked for: cut.
+        let off = PlanOptions {
+            travel_route: 0.0,
+            ..PlanOptions::default()
+        };
+        let d = plan("p", &[under, over], &off);
+        assert!(d.blocks[0].runs.len() >= 2);
+        assert!(
+            d.blocks[0]
+                .runs
+                .iter()
+                .all(|r| along(r).iter().all(|p| p.x < 105.0 || p.x > 135.0)),
+            "nothing sewn across the gap"
+        );
+    }
+
+    #[test]
+    fn travel_goes_through_a_neck_of_a_close_fill_but_not_an_open_one() {
+        // Two blocks joined by a neck 0.6 mm wide: one outline, but the
+        // walk round its inside (0.5 mm in) can't get through.
+        let necked: Polyline = vec![
+            P::new(0.0, 0.0),
+            P::new(100.0, 0.0),
+            P::new(100.0, 47.0),
+            P::new(120.0, 47.0),
+            P::new(120.0, 0.0),
+            P::new(220.0, 0.0),
+            P::new(220.0, 100.0),
+            P::new(120.0, 100.0),
+            P::new(120.0, 53.0),
+            P::new(100.0, 53.0),
+            P::new(100.0, 100.0),
+            P::new(0.0, 100.0),
+        ];
+        let mut sh = shape(fill(necked.clone()), Kind::Fill, [0; 3]);
+        sh.params.angle = Some(90.0);
+        let d = plan("p", &[sh.clone()], &PlanOptions::default());
+        assert_eq!(d.trim_count(), 0, "through the neck");
+        // All of it inside the outline (a row's end may pull a little past).
+        let grown = boolean::offset(&[necked], FillRule::NonZero, 6.0);
+        for run in &d.blocks[0].runs {
+            assert!(along(run).iter().all(|&p| crate::geom::point_inside(
+                &grown,
+                FillRule::NonZero,
+                p
+            )));
+        }
+        // Rows 2 mm apart hide nothing under them: cut instead.
+        sh.params.spacing = Some(2.0);
+        let d = plan("p", &[sh], &PlanOptions::default());
+        assert!(d.trim_count() > 0);
+    }
+
+    #[test]
+    fn connect_bridges_the_parts_of_one_object_and_says_where() {
+        let s = two_squares(30.0);
+        let d = plan("p", std::slice::from_ref(&s), &PlanOptions::default());
+        assert_eq!(d.trim_count(), 1);
+        assert!(d.bridges.is_empty());
+        let opt = PlanOptions {
+            connect: 300.0,
+            ..PlanOptions::default()
+        };
+        let d = plan("p", &[s], &opt);
+        assert_eq!(d.trim_count(), 0, "sewn across the gap");
+        assert_eq!(d.bridges.len(), 1);
+        let (a, b) = d.bridges[0];
+        assert!(a.dist(b) <= 300.0);
+        assert!(a.x.min(b.x) < 105.0 && a.x.max(b.x) > 125.0, "{a:?} {b:?}");
+        // Further apart than that: still cut.
+        let d = plan("p", &[two_squares(500.0)], &opt);
+        assert_eq!(d.trim_count(), 1);
+        assert!(d.bridges.is_empty());
+        // Centered, the bridges move with the stitches.
+        let mut d = plan("p", &[two_squares(30.0)], &opt);
+        let before = (d.bridges[0].0, d.blocks[0].runs[0].pts[0]);
+        d.center();
+        let after = (d.bridges[0].0, d.blocks[0].runs[0].pts[0]);
+        assert!((before.0 - after.0).dist(before.1 - after.1) < 1e-9);
     }
 
     #[test]

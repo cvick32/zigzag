@@ -53,6 +53,12 @@ pub struct Planner {
     pub pending: bool,
     /// The last plan was slow: plan in the background from now on.
     pub slow: bool,
+    /// In tests: go by how long plans take, as the app does. Otherwise a
+    /// test's plans are made here, where it reads them straight away,
+    /// unless it sets `slow` itself: a debug build on a busy machine is
+    /// slow at random, and the plan would still be with the worker.
+    #[cfg(test)]
+    pub timed: bool,
 }
 
 impl Planner {
@@ -98,6 +104,16 @@ impl Planner {
             .ok();
         self.jobs = Some(job_tx);
         self.done = Some(done_rx);
+    }
+
+    /// A plan took `ms`: a slow one sends the next ones to the worker.
+    pub fn took(&mut self, ms: f64) {
+        #[cfg(test)]
+        if !self.timed {
+            self.slow = false;
+            return;
+        }
+        self.slow = ms > SLOW_MS;
     }
 
     /// A synchronous plan was just made: anything still out is stale.
@@ -178,7 +194,7 @@ impl Studio {
         self.design = design;
         self.issues = issues;
         self.plan_ms = d.ms;
-        self.planner.slow = d.ms > SLOW_MS;
+        self.planner.took(d.ms);
         self.planner.pending = false;
         self.replans += 1;
         if let Some(p) = self.player {
