@@ -8,8 +8,79 @@ use crate::bezier::{Anchor, BezPath, SubPath};
 use crate::geom::{P, Polyline};
 use crate::params::Kind;
 
+pub mod fill_run;
+pub mod motif_run;
+pub mod repeated_run;
 mod satin_run;
+mod shared;
 pub use satin_run::SatinRun;
+
+/// Source model retained across resizes, rather than re-inferring generated stitches.
+pub enum StitchRun {
+    Satin(SatinRun),
+    Fill(fill_run::FillRun),
+    Motif(motif_run::MotifRun),
+    Repeated(repeated_run::RepeatedRun),
+}
+impl StitchRun {
+    pub fn recover(points: &[P]) -> Option<Self> {
+        if let Some(model) = repeated_run::RepeatedRun::recover(points)
+            && model.covered_fraction() >= 0.8
+        {
+            return Some(Self::Repeated(model));
+        }
+        let motif = motif_run::MotifRun::recover(points).map(Self::Motif);
+        let fill = fill_run::FillRun::recover(points).map(Self::Fill);
+        let satin = SatinRun::recover(points).map(Self::Satin);
+        [motif, fill, satin].into_iter().flatten().min_by_key(|m| {
+            m.uncertain_spans()
+                .iter()
+                .map(|(a, b)| b - a)
+                .sum::<usize>()
+        })
+    }
+    pub fn original(&self) -> &Polyline {
+        match self {
+            Self::Satin(m) => &m.original,
+            Self::Fill(m) => &m.original,
+            Self::Repeated(m) => &m.original,
+            Self::Motif(m) => &m.original,
+        }
+    }
+    pub fn generate(&self, matrix: crate::geom::Affine) -> Polyline {
+        match self {
+            Self::Satin(m) => m.generate(matrix),
+            Self::Fill(m) => m.generate(matrix),
+            Self::Repeated(m) => m.generate(matrix),
+            Self::Motif(m) => m.generate(matrix),
+        }
+    }
+    pub fn uncertain_spans(&self) -> Vec<(usize, usize)> {
+        match self {
+            Self::Satin(m) => m.uncertain_spans(),
+            Self::Fill(m) => m.uncertain_spans(),
+            Self::Repeated(m) => m.uncertain_spans(),
+            Self::Motif(m) => m.uncertain_spans(),
+        }
+    }
+    pub fn satin_count(&self) -> usize {
+        match self {
+            Self::Satin(m) => m.section_count(),
+            Self::Fill(m) => m.satin_count(),
+            Self::Motif(m) => m.satin_count(),
+            _ => 0,
+        }
+    }
+    pub fn fill_count(&self) -> usize {
+        match self {
+            Self::Fill(m) => m.fill_count(),
+            _ => 0,
+        }
+    }
+    pub fn repeated_count(&self) -> usize {
+        usize::from(matches!(self, Self::Repeated(_) | Self::Motif(_)))
+    }
+}
 
 pub struct Recovered {
     pub path: BezPath,

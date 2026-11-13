@@ -3,7 +3,7 @@
 use super::{Document, elements_by_id, xml_escape};
 use crate::geom::{Affine, P, affine_inv, affine_mul};
 use crate::params::Kind;
-use crate::reconstruct::SatinRun;
+use crate::reconstruct::StitchRun;
 use crate::svg::{Geometry, Part};
 use anyhow::{Result, anyhow};
 use std::collections::HashMap;
@@ -19,6 +19,7 @@ pub struct DensityWarning {
 pub struct DensityReport {
     pub fills: usize,
     pub satins: usize,
+    pub repeated_runs: usize,
     pub warnings: Vec<DensityWarning>,
 }
 
@@ -31,7 +32,7 @@ impl Document {
     // Store source coordinates in the element's local coordinate system via
     // `to_local`. Its ordinary SVG transform then handles moves, rotations,
     // groups and subsequent resizes without compounding reconstruction error.
-    fn satin_source(&self, index: usize) -> Result<Option<(SatinRun, Affine)>> {
+    fn stitch_source(&self, index: usize) -> Result<Option<(StitchRun, Affine)>> {
         let xml = roxmltree::Document::parse(&self.xml)?;
         let nodes = elements_by_id(&xml);
         let node = nodes[self.shapes[index].id.as_str()];
@@ -65,15 +66,15 @@ impl Document {
             Some((points, m))
         };
         let (points, m) = read().ok_or_else(|| anyhow!("invalid saved density source"))?;
-        let model = SatinRun::recover(&points)
-            .ok_or_else(|| anyhow!("saved satin source could not be reconstructed"))?;
+        let model = StitchRun::recover(&points)
+            .ok_or_else(|| anyhow!("saved stitch source could not be reconstructed"))?;
         Ok(Some((model, m)))
     }
 
-    fn save_satin_source(
+    fn save_stitch_source(
         &mut self,
         index: usize,
-        model: &SatinRun,
+        model: &StitchRun,
         to_local: Affine,
         original: &str,
     ) -> Result<()> {
@@ -81,7 +82,7 @@ impl Document {
         let nodes = elements_by_id(&xml);
         let node = nodes[self.shapes[index].id.as_str()];
         let source = serde_json::json!({
-            "version": 1, "points": model.original.iter().map(|p| [p.x, p.y]).collect::<Vec<_>>(),
+            "version": 1, "points": model.original().iter().map(|p| [p.x, p.y]).collect::<Vec<_>>(),
             "to_local": to_local, "generated": node.attribute("d").unwrap_or_default(),
         })
         .to_string();
@@ -133,7 +134,7 @@ impl Document {
             .filter_map(|&i| next.shapes.get(i).map(|s| s.uid))
             .collect();
         let mut report = DensityReport::default();
-        let mut satin_runs = Vec::new();
+        let mut stitch_runs = Vec::new();
         for &uid in &uids {
             let i = next
                 .shapes
@@ -144,8 +145,8 @@ impl Document {
             if s.params.kind != Some(Kind::Manual) {
                 continue;
             }
-            if let Some((model, to_local)) = next.satin_source(i)? {
-                satin_runs.push((uid, model, to_local, next.stitch_source_xml(i)?));
+            if let Some((model, to_local)) = next.stitch_source(i)? {
+                stitch_runs.push((uid, model, to_local, next.stitch_source_xml(i)?));
                 continue;
             }
             let recovered = match &s.geometry {
@@ -160,11 +161,11 @@ impl Document {
                     if let Geometry::Stroke { lines, .. } = &s.geometry
                         && lines.len() == 1
                         && !lines[0].1
-                        && let Some(model) = SatinRun::recover(&lines[0].0)
+                        && let Some(model) = StitchRun::recover(&lines[0].0)
                     {
                         let to_local = affine_inv(next.path_to_design(i)?)
                             .ok_or_else(|| anyhow!("degenerate stitch transform"))?;
-                        satin_runs.push((uid, model, to_local, next.stitch_source_xml(i)?));
+                        stitch_runs.push((uid, model, to_local, next.stitch_source_xml(i)?));
                         continue;
                     }
                     report.warnings.push(DensityWarning {
@@ -240,7 +241,7 @@ impl Document {
             .filter_map(|u| next.shapes.iter().position(|s| s.uid == *u))
             .collect();
         next.transform(&indices, m)?;
-        for (uid, model, to_local, original) in satin_runs {
+        for (uid, model, to_local, original) in stitch_runs {
             let i = next.shapes.iter().position(|s| s.uid == uid).unwrap();
             let label = next.shapes[i].label.clone();
             let transformed = affine_mul(next.path_to_design(i)?, to_local);
@@ -254,12 +255,14 @@ impl Document {
             }];
             next.set_path(i, &path)?;
             let i = next.shapes.iter().position(|s| s.uid == uid).unwrap();
-            next.save_satin_source(i, &model, to_local, &original)?;
-            report.satins += model.section_count();
+            next.save_stitch_source(i, &model, to_local, &original)?;
+            report.satins += model.satin_count();
+            report.fills += model.fill_count();
+            report.repeated_runs += model.repeated_count();
             for (start, end) in model.uncertain_spans() {
                 report.warnings.push(DensityWarning {
                     uid, label: format!("{label}: stitches {}–{}", start + 1, end + 1),
-                    reason: "This span is neither a recognized satin section nor a short connector; its stitches were scaled without preserving density.".into(),
+                    reason: "This span could not be confidently reconstructed; its stitches were scaled without preserving density.".into(),
                 });
             }
         }
@@ -353,8 +356,8 @@ mod tests {
             d.plan().per_shape[unsupported],
             original.plan().per_shape[unsupported]
         );
-        let (model, _) = d.satin_source(0).unwrap().unwrap();
-        let source = crate::reconstruct::recover(&model.original).unwrap();
+        let (model, _) = d.stitch_source(0).unwrap().unwrap();
+        let source = crate::reconstruct::recover(model.original()).unwrap();
         assert!((source.spacing_mm - 0.4).abs() < 1e-6);
         assert!(d.plan().stitch_count() > original.plan().stitch_count());
         let reloaded = Document::from_svg(&d.to_svg().unwrap(), "back", None).unwrap();
@@ -409,15 +412,21 @@ mod tests {
         let saved = d.to_svg().unwrap();
         assert!(saved.contains("data-zigzag-density-source="));
         let mut reopened = Document::from_svg(&saved, "reopened", None).unwrap();
-        let source = reopened.satin_source(0).unwrap().unwrap().0.original;
+        let source = reopened
+            .stitch_source(0)
+            .unwrap()
+            .unwrap()
+            .0
+            .original()
+            .clone();
         let resized = reopened
             .transform_keep_density(&[0], scale_about(P::default(), 0.5, 0.5))
             .unwrap();
         assert_eq!(resized.satins, 2);
         reopened.transform_keep_density(&[0], m).unwrap();
         assert_eq!(
-            reopened.satin_source(0).unwrap().unwrap().0.original,
-            source
+            reopened.stitch_source(0).unwrap().unwrap().0.original(),
+            &source
         );
         assert!(reopened.plan().stitch_count().abs_diff(plan.stitch_count()) <= 2);
         assert!((reopened.plan().bounds().width() - plan.bounds().width()).abs() < 0.1);
@@ -429,13 +438,13 @@ mod tests {
         let mut d = Document::from_svg(&to_svg(&file), "alower", None).unwrap();
         d.transform_keep_density(&[0], scale_about(P::default(), 2.0, 2.0))
             .unwrap();
-        assert!(d.satin_source(0).unwrap().is_some());
+        assert!(d.stitch_source(0).unwrap().is_some());
         d.transform(&[0], crate::geom::translation(P::new(20.0, 30.0)))
             .unwrap();
-        assert!(d.satin_source(0).unwrap().is_some());
+        assert!(d.stitch_source(0).unwrap().is_some());
         let mut p = d.edit_path(0).unwrap();
         p[0].anchors[10] = crate::bezier::Anchor::corner(P::new(400.0, 400.0));
         d.set_path(0, &p).unwrap();
-        assert!(d.satin_source(0).unwrap().is_none());
+        assert!(d.stitch_source(0).unwrap().is_none());
     }
 }

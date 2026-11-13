@@ -7,7 +7,7 @@ use crate::geom::{Affine, P, Polyline, affine_apply};
 use crate::stitch::satin::{self, Rails, SatinParams, SatinStyle};
 
 #[derive(Clone, Debug)]
-struct Section {
+struct SatinSection {
     start: usize,
     end: usize,
     pairs: Vec<(P, P)>,
@@ -16,7 +16,7 @@ struct Section {
 
 pub struct SatinRun {
     pub original: Polyline,
-    sections: Vec<Section>,
+    sections: Vec<SatinSection>,
 }
 
 /// A small edge cluster must be distinct from the opposite side. This is a
@@ -68,11 +68,15 @@ fn edge_visits(points: &[P]) -> Vec<usize> {
         .collect()
 }
 
-fn alternating(a: P, b: P, c: P) -> bool {
+fn alternating(a: P, b: P, c: P, narrow: bool) -> bool {
     let width = a.dist(b).min(b.dist(c));
-    (9.0..=70.0).contains(&width)
-        && a.dist(c) <= (width * 0.7).min(12.0)
-        && (b - a).norm().dot((c - b).norm()) < -0.65
+    if narrow && (4.0..9.0).contains(&width) {
+        a.dist(c) <= (width * 1.2).min(12.0) && (b - a).norm().dot((c - b).norm()) < -0.45
+    } else {
+        (9.0..=70.0).contains(&width)
+            && a.dist(c) <= (width * 0.7).min(12.0)
+            && (b - a).norm().dot((c - b).norm()) < -0.65
+    }
 }
 
 fn crossing(a: P, b: P, c: P, d: P) -> bool {
@@ -84,9 +88,9 @@ fn crossing(a: P, b: P, c: P, d: P) -> bool {
     s1 * s2 < -1e-6 && t1 * t2 < -1e-6
 }
 
-fn section(points: &[P], visits: &[usize]) -> Option<Section> {
+fn section(points: &[P], visits: &[usize]) -> Option<SatinSection> {
     let visits = &visits[..visits.len() / 2 * 2];
-    if visits.len() < 24 {
+    if visits.len() < 12 {
         return None;
     }
     let pairs: Vec<_> = visits
@@ -123,7 +127,7 @@ fn section(points: &[P], visits: &[usize]) -> Option<Section> {
             }
         }
     }
-    Some(Section {
+    Some(SatinSection {
         start: visits[0],
         end: *visits.last()?,
         pairs,
@@ -131,12 +135,151 @@ fn section(points: &[P], visits: &[usize]) -> Option<Section> {
     })
 }
 
+// Keep locally valid columns on either side of an overlapping pass or a
+// direction/spacing discontinuity. Rejecting the entire candidate discarded
+// hundreds of regular stitches when just one later cross-section folded back.
+fn split_sections(points: &[P], visits: &[usize], out: &mut Vec<SatinSection>) {
+    let visits = &visits[..visits.len() / 2 * 2];
+    if visits.len() < 12 {
+        return;
+    }
+    // Preserve complete columns that already satisfy every geometric check.
+    if let Some(whole) = section(points, visits) {
+        out.push(whole);
+        return;
+    }
+    let pairs: Vec<_> = visits
+        .chunks_exact(2)
+        .map(|v| (points[v[0]], points[v[1]]))
+        .collect();
+    let mut cells: std::collections::HashMap<(i64, i64), Vec<usize>> = Default::default();
+    let mut start = 0;
+    let mut reference = None;
+    for i in 0..pairs.len() {
+        let (a, b) = pairs[i];
+        let mut invalid = false;
+        if i > start {
+            let (c, d) = pairs[i - 1];
+            let step = (a.dist(c) + b.dist(d)) * 0.5;
+            let spacing = reference.unwrap_or(step);
+            invalid = step < 0.5
+                || step > spacing * 2.5
+                || step < spacing * 0.4
+                || (reference.is_none() && !(1.5..=8.0).contains(&step))
+                || (b - a).norm().dot((d - c).norm()) < 0.65;
+            if !invalid {
+                reference = Some(spacing);
+            }
+        }
+        for x in (a.x.min(b.x) / 80.0).floor() as i64..=(a.x.max(b.x) / 80.0).floor() as i64 {
+            for y in (a.y.min(b.y) / 80.0).floor() as i64..=(a.y.max(b.y) / 80.0).floor() as i64 {
+                if cells.get(&(x, y)).is_some_and(|bucket| {
+                    bucket
+                        .iter()
+                        .any(|&j| crossing(a, b, pairs[j].0, pairs[j].1))
+                }) {
+                    invalid = true;
+                }
+            }
+        }
+        if invalid {
+            if let Some(section) = section(points, &visits[start * 2..i * 2]) {
+                out.push(section);
+            }
+            start = i;
+            reference = None;
+            cells.clear();
+        }
+        for x in (a.x.min(b.x) / 80.0).floor() as i64..=(a.x.max(b.x) / 80.0).floor() as i64 {
+            for y in (a.y.min(b.y) / 80.0).floor() as i64..=(a.y.max(b.y) / 80.0).floor() as i64 {
+                cells.entry((x, y)).or_default().push(i);
+            }
+        }
+    }
+    if let Some(section) = section(points, &visits[start * 2..]) {
+        out.push(section);
+    }
+}
+
+// A running underlay can be long, but must progress smoothly rather than
+// oscillate between fill rows or satin rails. Strip only an explicit short,
+// collinear out-and-back lock for recognition; generation keeps every point.
+pub(super) fn running_underlay(points: &[P]) -> bool {
+    let mut p = points.to_vec();
+    p.dedup();
+    let lock = |p: &[P]| {
+        if p.len() < 5 || p[0].dist(p[4]) > 0.8 {
+            return false;
+        }
+        let axis = (p[2] - p[0]).norm();
+        p[0].dist(p[2]) <= 15.0
+            && p[0].dist(p[2]) >= 2.0
+            && p[..5]
+                .iter()
+                .all(|q| (*q - p[0]).dot(axis.perp()).abs() <= 0.8)
+            && p[1].dist(p[3]) <= 0.8
+    };
+    if lock(&p) {
+        p.drain(..4);
+    }
+    if p.len() >= 5 && lock(&p[p.len() - 5..]) {
+        p.truncate(p.len() - 4);
+    }
+    let steps: Vec<_> = p.windows(2).map(|w| w[1] - w[0]).collect();
+    if steps.is_empty() {
+        return true;
+    }
+    let lengths: Vec<_> = steps.iter().map(|d| d.len()).collect();
+    let typical = median(&lengths);
+    let long: Vec<_> = steps.iter().filter(|d| d.len() >= typical * 0.5).collect();
+    // Tatami rows turn through two right angles around a short connector.
+    // Their long stitches still reverse direction; don't call that underlay.
+    if long.windows(2).any(|w| w[0].norm().dot(w[1].norm()) < -0.3) {
+        return false;
+    }
+    // Sub-0.2 mm endpoint corrections may turn back just before a lock.
+    // Retain them in generation; ignore their unstable direction for classification.
+    let directions: Vec<_> = steps.iter().filter(|d| d.len() >= 2.0).collect();
+    (steps.len() == 1 && lengths[0] <= 70.0)
+        || (10.0..=60.0).contains(&typical)
+            && lengths
+                .iter()
+                .all(|d| *d >= 1.0 - 1e-4 && *d <= 300.0 + 1e-4)
+            && directions
+                .windows(2)
+                .all(|w| w[0].norm().dot(w[1].norm()) > -0.3)
+}
+
 impl SatinRun {
-    pub fn recover(points: &[P]) -> Option<Self> {
-        if points.len() < 24 || points.iter().any(|p| !p.x.is_finite() || !p.y.is_finite()) {
+    pub(super) fn connector_model(points: &[P]) -> Option<Self> {
+        if points.is_empty() {
             return None;
         }
-        let visits = edge_visits(points);
+        let model = Self {
+            original: points.to_vec(),
+            sections: Vec::new(),
+        };
+        model.connector(0, points.len() - 1).then_some(model)
+    }
+
+    pub fn recover(points: &[P]) -> Option<Self> {
+        if points.len() < 12 || points.iter().any(|p| !p.x.is_finite() || !p.y.is_finite()) {
+            return None;
+        }
+        let grouped = Self::recover_visits(points, &edge_visits(points), false);
+        let raw: Vec<_> = (0..points.len())
+            .filter(|&i| i == 0 || points[i].dist(points[i - 1]) > 0.1)
+            .collect();
+        let ungrouped = Self::recover_visits(points, &raw, true);
+        [grouped, ungrouped].into_iter().flatten().min_by_key(|m| {
+            m.uncertain_spans()
+                .iter()
+                .map(|(a, b)| b - a)
+                .sum::<usize>()
+        })
+    }
+
+    fn recover_visits(points: &[P], visits: &[usize], narrow: bool) -> Option<Self> {
         let mut sections = Vec::new();
         let mut start = 0;
         for j in 0..visits.len().saturating_sub(2) {
@@ -144,16 +287,13 @@ impl SatinRun {
                 points[visits[j]],
                 points[visits[j + 1]],
                 points[visits[j + 2]],
+                narrow,
             ) {
-                if let Some(s) = section(points, &visits[start..j + 2]) {
-                    sections.push(s);
-                }
+                split_sections(points, &visits[start..j + 2], &mut sections);
                 start = j + 1;
             }
         }
-        if let Some(s) = section(points, &visits[start..]) {
-            sections.push(s);
-        }
+        split_sections(points, &visits[start..], &mut sections);
         if sections.is_empty() {
             return None;
         }
@@ -176,24 +316,19 @@ impl SatinRun {
     }
 
     fn gaps(&self) -> Vec<(usize, usize)> {
-        let mut gaps = Vec::new();
-        let mut cursor = 0;
-        for s in &self.sections {
-            if s.start > cursor {
-                gaps.push((cursor, s.start));
-            }
-            cursor = s.end;
-        }
-        if cursor + 1 < self.original.len() {
-            gaps.push((cursor, self.original.len() - 1));
-        }
-        gaps
+        super::shared::gaps_between(
+            self.original.len(),
+            self.sections.iter().map(|s| (s.start, s.end)),
+        )
     }
 
     fn connector(&self, a: usize, b: usize) -> bool {
         // At most twelve source stitches between supported regions (including
         // locking stitches at the ends). Long/mixed regions remain explicitly
         // uncertain, even if they look like a running line.
+        if running_underlay(&self.original[a..=b]) {
+            return true;
+        }
         if b - a > 12 {
             return false;
         }
@@ -234,7 +369,36 @@ impl SatinRun {
                 .iter()
                 .map(|p| affine_apply(m, *p))
                 .collect();
-            if self.connector(a, b) {
+            if running_underlay(&self.original[a..=b]) {
+                let lengths: Vec<_> = self.original[a..=b]
+                    .windows(2)
+                    .map(|w| w[0].dist(w[1]))
+                    .filter(|d| *d > 0.1)
+                    .collect();
+                if lengths.is_empty() {
+                    out.extend(pts);
+                    return;
+                }
+                let length = median(&lengths).clamp(2.0, 70.0);
+                // Re-sample smooth stretches in both directions. Keep sharp
+                // corners and lock reversals as compulsory needle positions.
+                let mut start = 0;
+                for i in 1..pts.len() {
+                    let corner = i + 1 == pts.len()
+                        || (pts[i] - pts[i - 1])
+                            .norm()
+                            .dot((pts[i + 1] - pts[i]).norm())
+                            < 0.866;
+                    if corner {
+                        out.extend(
+                            crate::geom::sample_by_arclength(&pts[start..=i], length)
+                                .into_iter()
+                                .map(|p| p.0),
+                        );
+                        start = i;
+                    }
+                }
+            } else if self.connector(a, b) {
                 // Keep every corner and the sewing order; add points to long
                 // travel stitches when enlarging rather than stretching them.
                 out.extend(crate::geom::resample_keep_corners(&pts, 25.0));
@@ -356,12 +520,82 @@ mod tests {
     }
 
     #[test]
+    fn short_regular_column_keeps_spacing_without_accepting_locks() {
+        let points: Vec<_> = (0..7)
+            .flat_map(|i| [P::new(i as f64 * 3.0, 0.0), P::new(i as f64 * 3.0, 30.0)])
+            .collect();
+        let model = SatinRun::recover(&points).unwrap();
+        assert_eq!(model.section_count(), 1);
+        assert!(model.uncertain_spans().is_empty());
+        for scale in [0.5, 2.0] {
+            let generated = model.generate(scale_about(P::default(), scale, scale));
+            if scale < 1.0 {
+                assert!(generated.len() < points.len());
+            } else {
+                assert!(generated.len() > points.len());
+            }
+            let steps: Vec<_> = generated
+                .chunks_exact(2)
+                .map(|p| (p[0] + p[1]) * 0.5)
+                .collect();
+            assert!(
+                steps
+                    .windows(2)
+                    .all(|w| (w[0].dist(w[1]) - 3.0).abs() < 0.1)
+            );
+        }
+        let lock: Vec<_> = (0..20).map(|i| P::new((i % 2) as f64 * 4.0, 0.0)).collect();
+        assert!(SatinRun::recover(&lock).is_none());
+    }
+    #[test]
+    fn overlapping_passes_are_split_into_non_crossing_columns() {
+        let points: Vec<_> = (0..121)
+            .flat_map(|i| {
+                let t = i as f64 * std::f64::consts::TAU / 120.0;
+                let center = P::new(t.sin() * 60.0, (2.0 * t).sin() * 40.0);
+                let normal = P::new(t.cos() * 60.0, (2.0 * t).cos() * 80.0).norm().perp() * 15.0;
+                [center + normal, center - normal]
+            })
+            .collect();
+        let model = SatinRun::recover(&points).unwrap();
+        assert!(model.section_count() >= 2);
+        for section in &model.sections {
+            for (i, &(a, b)) in section.pairs.iter().enumerate() {
+                assert!(
+                    section.pairs[..i]
+                        .iter()
+                        .all(|&(c, d)| !crossing(a, b, c, d))
+                );
+            }
+        }
+        let output = model.generate(scale_about(P::default(), 2.0, 2.0));
+        assert!(output.len() > points.len() * 3 / 2);
+    }
+    #[test]
+    fn long_running_underlay_with_end_locks_is_supported() {
+        let mut p = vec![
+            P::new(0.0, 0.0),
+            P::new(6.0, 0.0),
+            P::new(12.0, 0.0),
+            P::new(6.0, 0.0),
+            P::new(0.0, 0.0),
+        ];
+        p.extend((1..30).map(|i| P::new(i as f64 * 20.0, 0.0)));
+        assert!(running_underlay(&p));
+        assert!(!running_underlay(&crate::reconstruct::tests::fill_sample()));
+        assert!(!running_underlay(&crate::reconstruct::tests::satin_sample()));
+    }
+
+    #[test]
     fn preserves_unrecognized_spans_and_rejects_non_satin() {
         let line: Vec<_> = (0..50).map(|i| P::new(i as f64 * 20.0, 0.0)).collect();
         assert!(SatinRun::recover(&line).is_none());
         assert!(SatinRun::recover(&crate::reconstruct::tests::fill_sample()).is_none());
         let mut p = sample();
-        p.extend(line);
+        let unknown: Vec<_> = (0..50)
+            .map(|i| P::new(i as f64 * 20.0, if i % 2 == 0 { 0.0 } else { 100.0 }))
+            .collect();
+        p.extend(unknown);
         let model = SatinRun::recover(&p).unwrap();
         assert!(!model.uncertain_spans().is_empty());
         let generated = model.generate(scale_about(P::default(), 2.0, 2.0));

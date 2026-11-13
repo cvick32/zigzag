@@ -542,8 +542,8 @@ impl Studio {
                 self.status = format!("{what} {}.", self.selection_label(idx.len()));
                 if let Some(r) = &report {
                     self.status.push_str(&format!(
-                        " Reconstructed {} fill(s), {} satin(s). {} uncertain object(s)/span(s) scaled without preserving density; review Transform panel.",
-                        r.fills, r.satins, r.warnings.len()
+                        " Reconstructed {} fill(s), {} satin(s), {} repeated run(s). {} uncertain object(s)/span(s) scaled without preserving density; review Transform panel.",
+                        r.fills, r.satins, r.repeated_runs, r.warnings.len()
                     ));
                 }
                 if resized {
@@ -1361,14 +1361,14 @@ impl Studio {
             return;
         }
         ui.checkbox(&mut self.layout.keep_stitch_density, "Keep stitch density")
-            .on_hover_text("Experimental: rebuild recognizable fills and satin sections before resizing. Uncertain spans resize normally and are flagged below. Original geometry is retained for later resizing; Undo restores the original stitches.");
+            .on_hover_text("Experimental: rebuild recognizable fills, satin sections, and repeated running stitches before resizing. Uncertain spans resize normally and are flagged below. Original geometry is retained for later resizing; Undo restores the original stitches.");
         if self.layout.keep_stitch_density {
             ui.small("Experimental. Uncertain spans resize normally and are flagged below.");
         }
         if let Some(report) = &self.layout.density_report {
             ui.label(format!(
-                "Last resize: {} fill(s), {} satin(s) reconstructed",
-                report.fills, report.satins
+                "Last resize: {} fill(s), {} satin(s), {} repeated run(s) reconstructed",
+                report.fills, report.satins, report.repeated_runs
             ));
             let mut select = None;
             if !report.warnings.is_empty() {
