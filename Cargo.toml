@@ -66,6 +66,17 @@ objc2 = { version = "0.6", optional = true }
 objc2-app-kit = { version = "0.3", optional = true, default-features = false, features = ["std", "NSApplication", "NSImage"] }
 objc2-foundation = { version = "0.3", optional = true, default-features = false, features = ["std", "NSData"] }
 
+# On Linux, btleplug talks to BlueZ over D-Bus; vendoring libdbus avoids
+# needing libdbus-1-dev installed to build.
+[target.'cfg(target_os = "linux")'.dependencies]
+libdbus-sys = { version = "0.2", optional = true, features = ["vendored"] }
+# Lets the native menu code be compile-checked on Linux (needs GTK 3 dev files).
+muda = { version = "0.21", optional = true }
+
+# Embeds the app icon and version metadata in every ZigZag .exe on Windows.
+[target.'cfg(target_os = "windows")'.build-dependencies]
+winresource = "0.1"
+
 [features]
 default = []
 gui = ["dep:eframe", "dep:rfd", "dep:tiny_http", "dep:objc2", "dep:objc2-app-kit", "dep:objc2-foundation"]
@@ -85,17 +96,6 @@ opt-level = 3
 [profile.release]
 lto = "thin"
 codegen-units = 1
-
-# On Linux, btleplug talks to BlueZ over D-Bus; vendoring libdbus avoids
-# needing libdbus-1-dev installed to build.
-[target.'cfg(target_os = "linux")'.dependencies]
-libdbus-sys = { version = "0.2", optional = true, features = ["vendored"] }
-# Lets the native menu code be compile-checked on Linux (needs GTK 3 dev files).
-muda = { version = "0.21", optional = true }
-
-# Embeds the app icon and version metadata in every ZigZag .exe on Windows.
-[target.'cfg(target_os = "windows")'.build-dependencies]
-winresource = "0.1"
 
 [dev-dependencies]
 egui_kittest = "0.37"
