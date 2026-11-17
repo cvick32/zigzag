@@ -826,6 +826,7 @@ impl Studio {
             History::Undo => self.redo.push(before),
             History::Redo => self.undo.push(before),
         }
+        self.layout.density_report = None;
         self.stable = self.doc.clone();
         if self.sel_index().is_none() {
             self.selected = None;
