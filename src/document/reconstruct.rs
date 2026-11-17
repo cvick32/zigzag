@@ -24,6 +24,33 @@ pub struct DensityReport {
 }
 
 impl Document {
+    fn path_to_design(&self, index: usize) -> Result<Affine> {
+        let tree = self.parsed()?;
+        let shape = self
+            .shapes
+            .get(index)
+            .ok_or_else(|| anyhow!("no object {index}"))?;
+        let node = tree
+            .node_by_id(&shape.id)
+            .ok_or_else(|| anyhow!("{} isn't drawn", shape.id))?;
+        let usvg::Node::Path(path) = node else {
+            return Err(anyhow!("lettering is edited as text, not point by point"));
+        };
+        let t = path.abs_transform();
+        let k = crate::svg::PX_TO_UNITS;
+        Ok(affine_mul(
+            [k, 0.0, 0.0, k, -self.offset.x, -self.offset.y],
+            [
+                t.sx as f64,
+                t.ky as f64,
+                t.kx as f64,
+                t.sy as f64,
+                t.tx as f64,
+                t.ty as f64,
+            ],
+        ))
+    }
+
     fn stitch_source_xml(&self, index: usize) -> Result<String> {
         let xml = roxmltree::Document::parse(&self.xml)?;
         let nodes = elements_by_id(&xml);
